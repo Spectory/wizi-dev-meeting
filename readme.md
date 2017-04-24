@@ -11,7 +11,13 @@ Offline architecture is more complex by default, since it adds additional logica
 
  - action -> sync -> request => server
 
-more about it at [genexus](http://wiki.genexus.com/commwiki/servlet/wiki?25536,Advanced+Concepts+of+Offline+Applications+architecture)
+it also raises issues and scenarios that you don't need to deal with usually
+ - what to do when connection is lost?
+ - what do do when connection resumes?
+ - what data should be synced?
+ - how to tell when unsynced data is obsolete?
+
+you can read more about it at [genexus](http://wiki.genexus.com/commwiki/servlet/wiki?25536,Advanced+Concepts+of+Offline+Applications+architecture)
 
 ## Multi device overview
 
@@ -248,7 +254,7 @@ const syncAll = async () => {
     i += 1;
     await sleep(SYNC_DELAY);
   }
-  // 4. fetch all events from buffer
+  // 4. fetch all events from buffer, notice the `selector` pattern usage
   const events = eventSelector.all();
   syncingEvents = [...events];
   if (!syncingEvents.length) {
@@ -297,3 +303,7 @@ lets see how it all plays along at the chart.
 1. reacting to user action
 2. reacting to socket connection.
 3. reacting to server update.
+
+### if we have time
+ - go over [dispatchers & selectors pattern](https://www.spectory.com/blog/MV*%20patterns%20with%20React%20Redux)
+ - go over event processing flow.
