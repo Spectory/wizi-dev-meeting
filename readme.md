@@ -1,27 +1,33 @@
 # Wizi dev
+At this meeting we'll go over WiziTime architecture, and how it solves wizi main product requirements.
 
 ## Offline apps overview
 
 One of the main features of Wizitime, is the user ability to continue working while offline.
 Offline architecture is more complex by default, since it adds additional logical layer at the client side.
 
-request -> server
-(request -> sync) -> server
 
-http://wiki.genexus.com/commwiki/servlet/wiki?25536,Advanced+Concepts+of+Offline+Applications+architecture
+ - action -> request => server
+
+ - action -> sync -> request => server
+
+more about it at [genexus](http://wiki.genexus.com/commwiki/servlet/wiki?25536,Advanced+Concepts+of+Offline+Applications+architecture)
 
 ## Multi device overview
 
 Another main feature of the app, is the multi device support - the user may use the app with multiple devices at the same time. Each device must be aware of the other actions.
 
-request -> server -> (sync -> db)
+ - request => server -> sync -> db => response
 
 ## Server Architecture overview
+
+### Socket API
+
 - request are passed via `Socket`
-  - sockets allow message passing to multiple devices.
+  - sockets allow message passing to multiple devices. Server can **push** messages to clients, not just response
 - request my never fail to return response. 
-  - must respond with error/ok
-  - no response is the same as offline from the client POV.
+  - Socket protocol does not force server responses. at Wizi we demand error/ok response on any message.
+  - notice that `no response` is the same as offline from the client POV.
 
 ```Elixir
 @doc """
@@ -48,11 +54,12 @@ def handle_in(event_name, params, socket) do
       Caught execption:
         #{inspect e}
       """)
-      {:reply, :error, socket}
+      {:reply, :error, socket} # Make sure we always respond even at exceptional cases.
   end
 end
 
 defp start_process_handle_in(event_name, params, socket) do
+  # `process_handle_in` method process incoming msg, and returns a response
   case process_handle_in(event_name, params, socket) do
     :ok -> {:reply, :ok, socket}
     {:ok, response} -> {:reply, {:ok, response}, socket}
@@ -63,15 +70,24 @@ defp start_process_handle_in(event_name, params, socket) do
 end
 ```
 
-At the begining, the server handeld events such as `START_CLOCK`, `STOP_CLOCK`...
+### Handling incoming messages
+
+At the first implantation, the server handled events such as `START_CLOCK`, `STOP_CLOCK`. but that didn't work so well...
 
 Why?
 
-**hard to keep data correctness at the DB if the user supply us with invalid stream of events!**
+**hard to keep data correctness at the DB if the user supply us with invalid series of events!**
 
-for example [START timeEntry-A, START timeEntry-B], will lead to 2 running time entries at DB.
+for example, a series such as 
 
-we deal with this by allowing only one event - the `BULK_EVENT`. `BULK_EVENT` is a group of events made by the user. when the server process it, it does so in a transaction. all or nothing.
+  1. START timeEntry-A
+  2. START timeEntry-B
+
+will lead to 2 running time entries at DB.
+
+We deal with this by allowing only one event - the `BULK_EVENT`.
+
+`BULK_EVENT` is a group of events made by the user. when the server process it, it does so in a `transaction`. all or nothing.
 
 ```Elixir
 defp process_handle_in(@bulk_event_name, params, socket) do
@@ -100,7 +116,8 @@ end
 ```
 
 the `brodcast!` notifies all connected devices the DB state has changed, and they need to sync them selves.
-notice that from the client POV, *it doesn't matter how made the changes* :)
+
+notice that from the client POV, *it doesn't matter who made the changes :)*
 
 ## Client Architecture overview
 
@@ -118,7 +135,14 @@ Redux reducers handle changes to the state.
 ### Socket Helper
 A wrapper around the `phoenix_socket` lib. its job it to handel data flow from **`Socket` to `Redux`**.
 
-notice the usage of the `dispatcher` pattern I described at my last blog post.
+notice the usage of the `dispatcher` pattern I described at my [last blog](https://www.spectory.com/blog/MV*%20patterns%20with%20React%20Redux) post.
+this is what allows us to covert socket events into redux actions. in other words it handles the data flow from **`Socket` to the `Redux`**.
+
+```
+Side Note:
+its always good practice to wrap external libs with a helper/service. it allows you to create an API to the external module.
+at our case, we can replace the `phoenix_socket` with some other socket lib, and the impact on our app is very contained.
+```
 
 ```javascript
 socketHelper.init = (storeDispatch) => {
@@ -146,7 +170,10 @@ socketHelper.push = (eventName, payload, timeout) => {
 ```
 
 ### SocketMiddleware
-socketMiddleware coverts redux actions into outgoing socket messages.
+There are a few ways to deal with async action at redux, one of them is by riding a middleware.
+this pattern is covered more in depth in [here](http://www.sohamkamani.com/blog/2016/06/05/redux-apis/)
+
+socketMiddleware coverts Redux actions into outgoing socket messages.
 
 in other words it handles the data flow from **`Redux` to the `Socket`**
 
@@ -161,6 +188,7 @@ const socketMiddleware = store => next => (action) => {
         .receive('timeout', onTimeout(action.payload.event_type, next));
       break;
     case SOCKET_BULK_PUSH:
+      // Here is our BULK EVENT :). 
       socketHelper.push(action.payload.event_type, action.payload.events, action.payload.timeout || 5000)
         .receive('error', onReceiveError(action.payload.event_type, next))
         .receive('ok', onReceiveOk(action.payload.event_type, next))
@@ -181,24 +209,26 @@ const socketMiddleware = store => next => (action) => {
 };
 ```
 
-### offline events
+### Offline events
 
 once the user performs an action (such as START_CLOCK), we need to pass this event to the server.
 if the server is not available, we need to buffer the event until we have server access.
 
-important thing to notice, is that instead of differentiate between online mode (i.e. no buffer needed), and offline mode, we can simply **always buffer**.
+important thing to notice, is that instead of differentiate between online mode (i.e. no buffer needed), and offline mode - we can simply **always buffer**.
 
 therefore, events that are stored on the Redux state acts as our buffer. this part of the state also persist by being stored on the local storage. the user may close the app, but the events are kept safe.
 
 ### SyncHelper
-this is probably the most delicate module at the client. it is of wizi core feature - allowing the app to run while offline.
+this is probably the most delicate module at the client. it is a major part of wizi core feature - allowing users to work while offline.
+
+sync process overview:
 
 1. user performs action
-2. an event is created by redux, and stored under the `state.events` (our buffer)
-3. the eventReducer also triggers for sync scheduling
-4. sync process starts, and locks. any future syncs requests will busy-wait on for a 15 secs.
+2. an event is created by redux
+3. the eventReducer reacts to that event - stores it under `state.events` (our buffer) and triggers sync scheduling.
+4. sync process starts, and locks. no 2 syncs can be run at the same time, any future syncs requests will busy-wait on for a 15 secs.
 5. sync process keeps a copy of events currently syncing (the user may perform additional actions while syncing is in progress) 
-6. server response ok/error/timeout
+6. server response ok/error, or timeouts
 7. response is handled by by `socketHelper`, which triggers needed Redux actions.
 8. Redux reducer triggers sync cleanup
 9. cleanup triggers action that removes synced events from state
@@ -207,6 +237,7 @@ this is probably the most delicate module at the client. it is of wizi core feat
 const syncAll = async () => {
   Logger.debug('syncHelper.syncAll: started!');
   let i = 0;
+  // 3. busy wait until last sync request is done.
   while (syncingEvents) {
     if (i > SYNC_ATTEMPTS) {
       syncErrorMsg();
@@ -217,6 +248,7 @@ const syncAll = async () => {
     i += 1;
     await sleep(SYNC_DELAY);
   }
+  // 4. fetch all events from buffer
   const events = eventSelector.all();
   syncingEvents = [...events];
   if (!syncingEvents.length) {
@@ -224,14 +256,17 @@ const syncAll = async () => {
     unSchedule();
     return;
   }
+  // 5. generate BULK_EVENT
   const evt = bulkEvent({ events: syncingEvents });
   Logger.debug('syncHelper.syncAll: dispatching `socketBulkPush` ');
+  // 6. pass BULK EVENT to socket
   socketDispatcher.socketBulkPush(evt);
   clearTimeout(scheduled);
   Logger.debug('syncHelper.syncAll: done!');
 };
 
 const performCleanUp = () => {
+  // 7. called when server returned OK response
   Logger.debug('syncHelper.cleanUp: dispatching `filterOutSynced` ');
   eventDispatcher.filterOutSynced([...syncingEvents]);
   unSchedule();
@@ -240,10 +275,12 @@ const performCleanUp = () => {
 syncHelper.schedule = (force) => {
   if (force) { clearTimeout(scheduled); }
   if (scheduled) {
+    // 1. there is a pending scheduled sync request. cancel it, and schedule a new one.
     Logger.debug('syncHelper.schedule: already scheduled, rescheduling...');
     unSchedule();
     syncHelper.schedule();
   } else {
+    // 2. start syncing in SYNC_DELAY milliseconds.
     scheduled = setTimeout(syncAll, SYNC_DELAY);
     Logger.debug(`syncHelper.schedule: scheduled sync in ${SYNC_DELAY} milliseconds`);
   }
@@ -254,7 +291,7 @@ syncHelper.cleanUp = () => {
 };
 ```
 
-### summery
+### Summery
 lets see how it all plays along at the chart.
 
 1. reacting to user action
